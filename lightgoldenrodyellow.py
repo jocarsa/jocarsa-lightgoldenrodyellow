@@ -57,21 +57,45 @@ def parse_files(root_path):
     return parsed_files
 
 def generate_code_report(root_path):
-    """Genera un reporte que incluye el mapa de directorios y el contenido de archivos."""
+    """Genera un reporte que incluye el mapa de directorios y el contenido de archivos en formato Markdown."""
     report_lines = []
-    report_lines.append("Project Directory Map:")
-    report_lines.append("----------------------")
+    
+    # Sección para el mapa de directorios en un bloque de código (opcional)
+    report_lines.append("### Project Directory Map")
+    report_lines.append("```")
     report_lines.append(build_directory_map(root_path))
-
-    report_lines.append("\nParsed Files:")
-    report_lines.append("-------------")
+    report_lines.append("```")
+    
+    # Sección para los archivos analizados
+    report_lines.append("\n### Parsed Files\n")
+    
     parsed_files = parse_files(root_path)
+    
+    # Mapeo de extensiones de archivo a etiquetas de lenguaje para bloques de código markdown
+    lang_mapping = {
+        '.html': 'html',
+        '.css': 'css',
+        '.js': 'js',
+        '.php': 'php',
+        '.py': 'python',
+        '.java': 'java'
+    }
+    
     for file_path, content in parsed_files:
-        header = f"\nFile: {file_path}\n" + "-" * (len("File: " + file_path))
-        report_lines.append(header)
+        filename = os.path.basename(file_path)
+        extension = os.path.splitext(filename)[1].lower()
+        language = lang_mapping.get(extension, '')  # Si no se encuentra, se deja sin etiqueta
+        
+        # Poner el nombre del archivo en negrita (Markdown)
+        report_lines.append(f"**{filename}**")
+        
+        # Agregar el contenido del archivo dentro de un bloque de código con la etiqueta correspondiente
+        report_lines.append(f"```{language}")
         report_lines.append(content)
-
+        report_lines.append("```")
+    
     return "\n".join(report_lines)
+
 
 # --- Funciones para análisis de base de datos ---
 
