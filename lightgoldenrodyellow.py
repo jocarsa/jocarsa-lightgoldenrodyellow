@@ -14,8 +14,8 @@ except ImportError:
 
 # --- Funciones para el análisis del proyecto ---
 
-ALLOWED_EXTENSIONS = ('.html', '.css', '.js', '.php', '.py', '.java')
-EXCLUDED_DIRS = {'.git', 'node_modules'}
+ALLOWED_EXTENSIONS = ('.html', '.css', '.js', '.php', '.py', '.java','.sql')
+EXCLUDED_DIRS = {'.git', 'node_modules','vendor'}
 
 def build_directory_map(root_path):
     """Construye un mapa de directorios en forma de árbol."""
@@ -114,7 +114,6 @@ def analyze_mysql_database(server, user, password, database):
             cursor.execute(f"SHOW COLUMNS FROM {table_name};")
             columns = cursor.fetchall()
             for col in columns:
-                # col[0]: Field, col[1]: Type
                 table_details.append(f"        Column: {col[0]} ({col[1]})")
         conn.close()
         db_details += "\n".join(table_details)
@@ -187,22 +186,26 @@ def save_mysql_data():
     database = entry_mysql_db.get().strip()
     save_last_used_paths(mysql_data={"server": server, "user": user, "password": password, "database": database})
 
-# --- Función para generar el prompt completo ---
-def generar_prompt():
-    # Texto base de ejemplo
-    prompt = ("Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar: "
-              "\n\n")
+# --- Funciones para generar el prompt completo ---
 
-    # Recopilar datos de los campos de texto
+def generar_prompt():
+    """Genera el prompt usando los datos del formulario y el análisis del proyecto y base de datos."""
+    prompt = "Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar:\n\n"
+
+    # Recopilar datos de los campos de texto y agregar solo si no están vacíos
     contexto = txt_contexto.get("1.0", tk.END).strip()
     objetivo = txt_objetivo.get("1.0", tk.END).strip()
     restricciones = txt_restricciones.get("1.0", tk.END).strip()
     formato_salida = txt_formato.get("1.0", tk.END).strip()
 
-    prompt += f"Contexto: {contexto}\n\n"
-    prompt += f"Objetivo: {objetivo}\n\n"
-    prompt += f"Restricciones: {restricciones}\n\n"
-    prompt += f"Formato de salida: {formato_salida}\n\n"
+    if contexto:
+        prompt += f"Contexto: {contexto}\n\n"
+    if objetivo:
+        prompt += f"Objetivo: {objetivo}\n\n"
+    if restricciones:
+        prompt += f"Restricciones: {restricciones}\n\n"
+    if formato_salida:
+        prompt += f"Formato de salida: {formato_salida}\n\n"
 
     # Incluir reporte de código si se ha seleccionado una carpeta
     if selected_project_folder:
@@ -211,20 +214,20 @@ def generar_prompt():
     else:
         prompt += "\n(No se ha seleccionado carpeta del proyecto para análisis de código)\n\n"
 
-    # Analizar la base de datos seleccionada
+    # Agregar reporte de base de datos solo si se tienen datos
+    db_report = ""
     if db_option.get() == "sqlite":
         if sqlite_file_path:
             db_report = analyze_sqlite_database(sqlite_file_path)
-        else:
-            db_report = "No se ha seleccionado archivo SQLite."
     else:  # MySQL
         server = entry_mysql_server.get().strip()
         user = entry_mysql_user.get().strip()
         password = entry_mysql_pass.get().strip()
         database = entry_mysql_db.get().strip()
-        db_report = analyze_mysql_database(server, user, password, database)
-
-    prompt += "\n===== Database Report =====\n" + db_report
+        if server and user and password and database:
+            db_report = analyze_mysql_database(server, user, password, database)
+    if db_report:
+        prompt += "\n===== Database Report =====\n" + db_report
 
     # Mostrar el prompt en el área de salida
     txt_prompt_output.config(state=tk.NORMAL)
@@ -232,7 +235,46 @@ def generar_prompt():
     txt_prompt_output.insert(tk.END, prompt)
     txt_prompt_output.config(state=tk.DISABLED)
 
-# --- Funciones para copiar y guardar el reporte ---
+def generar_prompt_for_folder(project_folder):
+    """Genera el prompt para un folder específico (usado para proyectos jocarsa-)."""
+    prompt = "Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar:\n\n"
+
+    contexto = txt_contexto.get("1.0", tk.END).strip()
+    objetivo = txt_objetivo.get("1.0", tk.END).strip()
+    restricciones = txt_restricciones.get("1.0", tk.END).strip()
+    formato_salida = txt_formato.get("1.0", tk.END).strip()
+
+    if contexto:
+        prompt += f"Contexto: {contexto}\n\n"
+    if objetivo:
+        prompt += f"Objetivo: {objetivo}\n\n"
+    if restricciones:
+        prompt += f"Restricciones: {restricciones}\n\n"
+    if formato_salida:
+        prompt += f"Formato de salida: {formato_salida}\n\n"
+
+    # Reporte de código para el folder específico
+    code_report = generate_code_report(project_folder)
+    prompt += "\n===== Code Report =====\n" + code_report + "\n\n"
+
+    # Reutilizar la lógica de base de datos
+    db_report = ""
+    if db_option.get() == "sqlite":
+        if sqlite_file_path:
+            db_report = analyze_sqlite_database(sqlite_file_path)
+    else:
+        server = entry_mysql_server.get().strip()
+        user = entry_mysql_user.get().strip()
+        password = entry_mysql_pass.get().strip()
+        database = entry_mysql_db.get().strip()
+        if server and user and password and database:
+            db_report = analyze_mysql_database(server, user, password, database)
+    if db_report:
+        prompt += "\n===== Database Report =====\n" + db_report
+
+    return prompt
+
+# --- Función para copiar y guardar el reporte ---
 
 def copy_report():
     report_text = txt_prompt_output.get("1.0", tk.END)
@@ -276,6 +318,40 @@ def save_last_used_paths(code_folder=None, db_folder=None, mysql_data=None):
         config["mysql"] = mysql_data
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
+
+# --- Nueva función para guardar prompts en proyectos jocarsa- en una carpeta "prompts" ---
+
+def save_prompts_for_jocarsa_projects():
+    """
+    Busca subcarpetas que comiencen con 'jocarsa-' en la carpeta seleccionada y guarda el prompt
+    en la carpeta 'prompts' (creada junto al script) con el nombre de cada folder.
+    """
+    if not selected_project_folder:
+        messagebox.showwarning("No folder selected", "Por favor, selecciona una carpeta del proyecto primero.")
+        return
+
+    # Determinar la carpeta donde se encuentra el script y crear (si no existe) la carpeta "prompts"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prompts_folder = os.path.join(script_dir, "prompts")
+    if not os.path.exists(prompts_folder):
+        os.makedirs(prompts_folder)
+
+    saved_count = 0
+    for entry in os.listdir(selected_project_folder):
+        full_path = os.path.join(selected_project_folder, entry)
+        if os.path.isdir(full_path) and entry.startswith("jocarsa-"):
+            prompt_text = generar_prompt_for_folder(full_path)
+            file_path = os.path.join(prompts_folder, entry + ".txt")
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(prompt_text)
+                saved_count += 1
+            except Exception as e:
+                print(f"Error al guardar prompt en {entry}: {e}")
+    if saved_count > 0:
+        messagebox.showinfo("Prompts guardados", f"Prompts guardados para {saved_count} proyecto(s) en la carpeta 'prompts'.")
+    else:
+        messagebox.showinfo("Sin proyectos", "No se encontraron carpetas que comiencen con 'jocarsa-'.")
 
 # --- Configuración de la ventana principal ---
 style = ttk.Style('flatly')
@@ -403,6 +479,10 @@ btn_test_connection.pack(pady=5, fill=tk.X)
 btn_generar = ttk.Button(frame_left, text="Generar Prompt", bootstyle=SUCCESS, command=generar_prompt)
 btn_generar.pack(pady=10, fill=tk.X)
 
+# Nuevo botón para guardar prompts en carpetas "jocarsa-" dentro de la carpeta "prompts"
+btn_save_prompts = ttk.Button(frame_left, text="Guardar Prompts para proyectos jocarsa-", bootstyle=SUCCESS, command=save_prompts_for_jocarsa_projects)
+btn_save_prompts.pack(pady=10, fill=tk.X)
+
 # --- PANEL DERECHO: SALIDA DEL PROMPT ---
 lbl_prompt_title = ttk.Label(frame_right, text="Prompt Generado", font=("Arial", 14, "bold"))
 lbl_prompt_title.pack(anchor="w", pady=(0,10))
@@ -424,21 +504,18 @@ btn_copy.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 btn_save = ttk.Button(frame_report_buttons, text="Guardar Reporte", command=save_report)
 btn_save.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-# Cargar las rutas usadas anteriormente al iniciar la aplicación
+# Cargar las rutas usadas anteriormente al iniciar la aplicación (sin alertas flotantes)
 last_used_paths = load_last_used_paths()
 if "last_code_folder" in last_used_paths:
     selected_project_folder = last_used_paths["last_code_folder"]
-    messagebox.showinfo("Carpeta Cargada", f"Carpeta cargada desde configuración:\n{selected_project_folder}")
 if "last_db_folder" in last_used_paths:
     sqlite_file_path = last_used_paths["last_db_folder"]
     lbl_sqlite.config(text=os.path.basename(sqlite_file_path))
-    messagebox.showinfo("SQLite Cargado", f"SQLite cargado desde configuración:\n{sqlite_file_path}")
 if "mysql" in last_used_paths:
     mysql_data = last_used_paths["mysql"]
     entry_mysql_server.insert(0, mysql_data.get("server", ""))
     entry_mysql_user.insert(0, mysql_data.get("user", ""))
     entry_mysql_pass.insert(0, mysql_data.get("password", ""))
     entry_mysql_db.insert(0, mysql_data.get("database", ""))
-    messagebox.showinfo("MySQL Cargado", "Datos MySQL cargados desde configuración.")
 
 root.mainloop()
