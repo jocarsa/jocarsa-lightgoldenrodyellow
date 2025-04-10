@@ -96,6 +96,34 @@ def generate_code_report(root_path):
     
     return "\n".join(report_lines)
 
+# --- NUEVA FUNCIONALIDAD EXTRAÍDA DE SOFTWARE B ---
+def generate_folder_titles(root_path):
+    """
+    Genera una jerarquía de títulos en Markdown basada en la estructura de carpetas.
+    
+    - Las carpetas que están directamente en el directorio raíz se muestran como títulos de nivel 1 (usando un "#").
+    - Las subcarpetas se muestran como títulos de nivel 2 (usando "##"), y así sucesivamente.
+    
+    Parámetros:
+        root_path (str): Ruta a la carpeta raíz del proyecto.
+    
+    Retorna:
+        str: Cadena de texto en formato Markdown con la jerarquía de títulos.
+    """
+    markdown_lines = []
+    for current_root, dirs, _ in os.walk(root_path):
+        # Obtenemos la ruta relativa para determinar la profundidad
+        rel_path = os.path.relpath(current_root, root_path)
+        if rel_path == '.':
+            # Saltamos la carpeta raíz
+            continue
+        # La profundidad es el número de separadores en la ruta relativa
+        depth = len(rel_path.split(os.sep))
+        heading = "#" * depth  # Genera el número adecuado de '#' para el nivel
+        folder_name = os.path.basename(current_root)
+        markdown_lines.append(f"{heading} {folder_name}")
+    return "\n".join(markdown_lines)
+# --- FIN NUEVA FUNCIONALIDAD ---
 
 # --- Funciones para análisis de base de datos ---
 
@@ -138,7 +166,6 @@ def analyze_mysql_database(server, user, password, database):
             cursor.execute(f"SHOW COLUMNS FROM {table_name};")
             columns = cursor.fetchall()
             for col in columns:
-                # col[0]: Field, col[1]: Type
                 table_details.append(f"        Column: {col[0]} ({col[1]})")
         conn.close()
         db_details += "\n".join(table_details)
@@ -232,6 +259,11 @@ def generar_prompt():
     if selected_project_folder:
         code_report = generate_code_report(selected_project_folder)
         prompt += "\n===== Code Report =====\n" + code_report + "\n\n"
+        
+        # --- NUEVA SECCIÓN: Jerarquía de Títulos basada en Carpetas ---
+        folder_titles = generate_folder_titles(selected_project_folder)
+        prompt += "\n===== Folder Titles Hierarchy =====\n"
+        prompt += "```markdown\n" + folder_titles + "\n```\n"
     else:
         prompt += "\n(No se ha seleccionado carpeta del proyecto para análisis de código)\n\n"
 
