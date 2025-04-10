@@ -57,21 +57,73 @@ def parse_files(root_path):
     return parsed_files
 
 def generate_code_report(root_path):
-    """Genera un reporte que incluye el mapa de directorios y el contenido de archivos."""
+    """Genera un reporte que incluye el mapa de directorios y el contenido de archivos en formato Markdown."""
     report_lines = []
-    report_lines.append("Project Directory Map:")
-    report_lines.append("----------------------")
+    
+    # Sección para el mapa de directorios en un bloque de código (opcional)
+    report_lines.append("### Project Directory Map")
+    report_lines.append("```")
     report_lines.append(build_directory_map(root_path))
-
-    report_lines.append("\nParsed Files:")
-    report_lines.append("-------------")
+    report_lines.append("```")
+    
+    # Sección para los archivos analizados
+    report_lines.append("\n### Parsed Files\n")
+    
     parsed_files = parse_files(root_path)
+    
+    # Mapeo de extensiones de archivo a etiquetas de lenguaje para bloques de código markdown
+    lang_mapping = {
+        '.html': 'html',
+        '.css': 'css',
+        '.js': 'js',
+        '.php': 'php',
+        '.py': 'python',
+        '.java': 'java'
+    }
+    
     for file_path, content in parsed_files:
-        header = f"\nFile: {file_path}\n" + "-" * (len("File: " + file_path))
-        report_lines.append(header)
+        filename = os.path.basename(file_path)
+        extension = os.path.splitext(filename)[1].lower()
+        language = lang_mapping.get(extension, '')  # Si no se encuentra, se deja sin etiqueta
+        
+        # Poner el nombre del archivo en negrita (Markdown)
+        report_lines.append(f"**{filename}**")
+        
+        # Agregar el contenido del archivo dentro de un bloque de código con la etiqueta correspondiente
+        report_lines.append(f"```{language}")
         report_lines.append(content)
-
+        report_lines.append("```")
+    
     return "\n".join(report_lines)
+
+# --- NUEVA FUNCIONALIDAD EXTRAÍDA DE SOFTWARE B ---
+def generate_folder_titles(root_path):
+    """
+    Genera una jerarquía de títulos en Markdown basada en la estructura de carpetas.
+    
+    - Las carpetas que están directamente en el directorio raíz se muestran como títulos de nivel 1 (usando un "#").
+    - Las subcarpetas se muestran como títulos de nivel 2 (usando "##"), y así sucesivamente.
+    
+    Parámetros:
+        root_path (str): Ruta a la carpeta raíz del proyecto.
+    
+    Retorna:
+        str: Cadena de texto en formato Markdown con la jerarquía de títulos.
+    """
+    markdown_lines = []
+    for current_root, dirs, _ in os.walk(root_path):
+        # Obtenemos la ruta relativa para determinar la profundidad
+        rel_path = os.path.relpath(current_root, root_path)
+        if rel_path == '.':
+            # Saltamos la carpeta raíz
+            continue
+        # La profundidad es el número de separadores en la ruta relativa
+        depth = len(rel_path.split(os.sep))
+        heading = "#" * depth  # Genera el número adecuado de '#' para el nivel
+        folder_name = os.path.basename(current_root)
+        markdown_lines.append(f"{heading} {folder_name}")
+    return "\n".join(markdown_lines)
+# --- FIN NUEVA FUNCIONALIDAD ---
 
 # --- Funciones para análisis de base de datos ---
 
@@ -211,6 +263,11 @@ def generar_prompt():
     if selected_project_folder:
         code_report = generate_code_report(selected_project_folder)
         prompt += "\n===== Code Report =====\n" + code_report + "\n\n"
+        
+        # --- NUEVA SECCIÓN: Jerarquía de Títulos basada en Carpetas ---
+        folder_titles = generate_folder_titles(selected_project_folder)
+        prompt += "\n===== Folder Titles Hierarchy =====\n"
+        prompt += "```markdown\n" + folder_titles + "\n```\n"
     else:
         prompt += "\n(No se ha seleccionado carpeta del proyecto para análisis de código)\n\n"
 
