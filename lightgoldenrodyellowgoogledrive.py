@@ -5,6 +5,9 @@ from tkinter import filedialog, messagebox
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import sqlite3
+import re
+
+placeholder = 0
 
 # For MySQL support, ensure you have pymysql installed (pip install pymysql)
 try:
@@ -18,63 +21,132 @@ EXCLUDED_DIRS = {'.git', 'node_modules', 'vendor'}
 
 # --- NUEVA FUNCIÓN: Reporte intercalado (Interleaved) ---
 def generate_interleaved_report(root_path, depth=1):
+    global placeholder
     """
     Genera un reporte en Markdown intercalando:
       - Un encabezado para cada carpeta basado en su profundidad.
       - Dentro de cada carpeta, se listan los archivos permitidos con su nombre en negrita y su contenido en bloques de código.
+    Cuando estamos dentro de un folder con "Proyecto" en el nombre, se muestra primero la estructura del proyecto y luego todos los archivos recursivamente,
+    sin generar títulos de subcarpetas, anteponiendo la ruta relativa al nombre de archivo.
     """
     # Mapeo de extensiones a etiquetas para bloques de código Markdown.
     lang_mapping = {
-        '.html': 'html',
-        '.css': 'css',
-        '.js': 'js',
-        '.php': 'php',
-        '.py': 'python',
-        '.java': 'java',
-        '.sql': 'sql'
+        '.html': 'html', '.css': 'css', '.js': 'js', '.php': 'php',
+        '.py': 'python', '.java': 'java', '.sql': 'sql', '.c': 'c',
+        '.cpp': 'cpp', '.cu': 'cuda', '.h': 'c', '.json': 'json'
     }
     report_lines = []
-    folder_name = os.path.basename(root_path) if os.path.basename(root_path) else root_path
-    header = "#" * depth  # Un "#" por cada nivel de profundidad.
-    report_lines.append(f"{header} {folder_name}")
-    
-    # Listar el contenido de la carpeta
+    base_name = os.path.basename(root_path)
+    is_proyecto = 'Proyecto' in base_name
+
+    print(f"Root Path: {root_path}")
+    print(f"Base Name: {base_name}")
+
+    if is_proyecto:
+        # Encabezado de la carpeta Proyecto
+        header = '#' * depth
+        report_lines.append(f"{header} {base_name}")
+        placeholder += 1
+        report_lines.append(f"/n[placeholder {placeholder}] /n")
+        # Estructura del proyecto
+        structure_tree = build_directory_map(root_path)
+        report_lines.append(" \n Estructura del proyecto: \n ")
+        report_lines.append(" \n" + structure_tree + "\n \n")
+        # Listado recursivo de archivos permitidos sin títulos de carpetas
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            midir = dirpath.replace(root_path,"")
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+            rel_dir = os.path.relpath(dirpath, root_path)
+            print(f"Directory Path: {dirpath}")
+            print(f"Relative Directory: {rel_dir}")
+            prefix = '' if rel_dir == '.' else rel_dir.replace('\\', '/') + '/'
+            for filename in sorted(filenames):
+                if filename.lower().endswith(ALLOWED_EXTENSIONS):
+                    full_path = os.path.join(dirpath, filename)
+                    report_lines.append(f"\n . \n ###### {prefix}{filename}")
+                    try:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                    except Exception as e:
+                        content = f"Error al leer el archivo: {e}"
+                    for line in content.splitlines():
+                        if '-' in line:
+                            #line = line.split('-', 1)[-1].strip()
+                            line = line
+                        if not line.strip():
+                            line = ' '
+                        report_lines.append(f"###### `{line}`")
+                    report_lines.append(" ")
+                elif filename.lower().endswith(('.jpg', '.png')):
+                    rel_path = os.path.relpath(dirpath, root_path)
+                    print(f"Base Name: {base_name}")
+                    print(f"Relative Path: {rel_path}")
+                    github_path = f"https://github.com/jocarsa{midir}/{filename}"
+                    report_lines.append(f"\n . \n ###### ![{filename}]({github_path})")
+        return "\n ".join(report_lines)
+
+    # Flujo original para carpetas que no son Proyecto
     try:
         entries = sorted(os.listdir(root_path))
     except Exception as e:
         report_lines.append(f"Error listando la carpeta: {e}")
         return "\n".join(report_lines)
-    
-    # Procesar archivos permitidos en la carpeta actual.
+
+    # Archivos permitidos en el directorio actual
     for entry in entries:
         full_path = os.path.join(root_path, entry)
+        midir = root_path.replace(root_path,"")
         if os.path.isfile(full_path) and entry.lower().endswith(ALLOWED_EXTENSIONS):
-            extension = os.path.splitext(entry)[1].lower()
-            language = lang_mapping.get(extension, '')
-            report_lines.append(f"**{entry}**")
+            placeholder += 1
+            report_lines.append(f" [Placeholder {placeholder}] ")
+            report_lines.append(f"###### {entry}")
             try:
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
             except Exception as e:
                 content = f"Error al leer el archivo: {e}"
-            report_lines.append(f"```{language}")
-            report_lines.append(content)
-            report_lines.append("```")
-    
-    # Procesar subdirectorios (evitando los que estén en EXCLUDED_DIRS)
+            for line in content.splitlines():
+                if '-' in line:
+                    #line = line.split('-', 1)[-1].strip()
+                    line = line
+                if not line.strip():
+                    line = ' '
+                report_lines.append(f"###### `{line}`")
+        elif os.path.isfile(full_path) and entry.lower().endswith(('.jpg', '.png')):
+            rel_path = os.path.relpath(root_path, start=os.path.dirname(root_path))
+            github_path = f"https://github.com/jocarsa/tree/main{midir}/{entry}"
+            report_lines.append(f"\n . \n ###### ![{entry}]({github_path})")
+
+    # Recursión a subdirectorios
     for entry in entries:
         full_path = os.path.join(root_path, entry)
         if os.path.isdir(full_path) and entry not in EXCLUDED_DIRS:
+            folder_name = entry
+            if '-' in folder_name:
+                folder_name = folder_name.split('-', 1)[-1].strip()
+            header = '#' * depth
+            report_lines.append(f"{header} {folder_name}")
+            placeholder += 1
+            report_lines.append(f" [Placeholder {placeholder}] ")
             report_lines.append(generate_interleaved_report(full_path, depth + 1))
-    
+
     return "\n".join(report_lines)
+
+
+
+
+
+
+
 
 # --- Funciones originales para análisis de código (para otros usos) ---
 def build_directory_map(root_path):
     """Construye un mapa de directorios en forma de árbol."""
     lines = []
     root_abs = os.path.abspath(root_path)
-    lines.append(root_abs)
+    # Get the base name of the root path
+    root_name = os.path.basename(root_abs)
+    lines.append(f"###### `{root_name}`")
 
     def inner(dir_path, prefix=""):
         try:
@@ -85,7 +157,7 @@ def build_directory_map(root_path):
         for i, entry in enumerate(entries):
             full_path = os.path.join(dir_path, entry)
             connector = "└── " if i == len(entries) - 1 else "├── "
-            lines.append(prefix + connector + entry)
+            lines.append(f"###### `{prefix}{connector}{entry}`")
             if os.path.isdir(full_path):
                 extension = "    " if i == len(entries) - 1 else "│   "
                 inner(full_path, prefix + extension)
@@ -112,9 +184,9 @@ def generate_code_report(root_path):
     """Genera un reporte con el mapa de directorios y el contenido de archivos en formato Markdown."""
     report_lines = []
     report_lines.append("### Project Directory Map")
-    report_lines.append("```")
+    report_lines.append("")
     report_lines.append(build_directory_map(root_path))
-    report_lines.append("```")
+    report_lines.append("")
     report_lines.append("\n### Parsed Files\n")
     parsed_files = parse_files(root_path)
     lang_mapping = {
@@ -269,13 +341,13 @@ def save_mysql_data():
 def generar_prompt():
     """Genera el prompt usando los datos del formulario, la estructura del proyecto y el reporte intercalado."""
     prompt = "Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar:\n\n"
-    
+
     # Recopilar datos del formulario
     contexto = txt_contexto.get("1.0", tk.END).strip()
     objetivo = txt_objetivo.get("1.0", tk.END).strip()
     restricciones = txt_restricciones.get("1.0", tk.END).strip()
     formato_salida = txt_formato.get("1.0", tk.END).strip()
-    
+
     if contexto:
         prompt += f"Contexto: {contexto}\n\n"
     if objetivo:
@@ -284,19 +356,20 @@ def generar_prompt():
         prompt += f"Restricciones: {restricciones}\n\n"
     if formato_salida:
         prompt += f"Formato de salida: {formato_salida}\n\n"
-    
-    # Agregar la estructura del proyecto en forma de árbol
+
+    # Agregar la estructura del proyecto en forma de árbol si la carpeta contiene "Proyecto"
     if selected_project_folder:
-        structure_tree = build_directory_map(selected_project_folder)
-        prompt += "\n===== Project Structure =====\n"
-        prompt += "```\n" + structure_tree + "\n```\n\n"
-    
+        if "Proyecto" in selected_project_folder:
+            structure_tree = build_directory_map(selected_project_folder)
+            prompt += "\n Estructura del proyecto \n"
+            prompt += "\n" + structure_tree + "\n\n\n"
+
         # Agregar reporte del código intercalado
         interleaved_report = generate_interleaved_report(selected_project_folder)
         prompt += "\n===== Code Report (Interleaved) =====\n" + interleaved_report + "\n\n"
     else:
         prompt += "\n(No se ha seleccionado carpeta del proyecto para análisis de código)\n\n"
-    
+
     # Agregar reporte de base de datos (si se ha seleccionado)
     db_report = ""
     if db_option.get() == "sqlite":
@@ -311,7 +384,7 @@ def generar_prompt():
             db_report = analyze_mysql_database(server, user, password, database)
     if db_report:
         prompt += "\n===== Database Report =====\n" + db_report
-    
+
     txt_prompt_output.config(state=tk.NORMAL)
     txt_prompt_output.delete("1.0", tk.END)
     txt_prompt_output.insert(tk.END, prompt)
@@ -320,12 +393,12 @@ def generar_prompt():
 def generar_prompt_for_folder(project_folder):
     """Genera el prompt para un folder específico (usado para proyectos 'jocarsa-')."""
     prompt = "Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar:\n\n"
-    
+
     contexto = txt_contexto.get("1.0", tk.END).strip()
     objetivo = txt_objetivo.get("1.0", tk.END).strip()
     restricciones = txt_restricciones.get("1.0", tk.END).strip()
     formato_salida = txt_formato.get("1.0", tk.END).strip()
-    
+
     if contexto:
         prompt += f"Contexto: {contexto}\n\n"
     if objetivo:
@@ -334,15 +407,15 @@ def generar_prompt_for_folder(project_folder):
         prompt += f"Restricciones: {restricciones}\n\n"
     if formato_salida:
         prompt += f"Formato de salida: {formato_salida}\n\n"
-    
+
     # Estructura del proyecto y reporte intercalado para el folder específico.
     structure_tree = build_directory_map(project_folder)
     prompt += "\n===== Project Structure =====\n"
-    prompt += "```\n" + structure_tree + "\n```\n\n"
-    
+    prompt += " \n" + structure_tree + "\n \n\n"
+
     code_report = generate_interleaved_report(project_folder)
     prompt += "\n===== Code Report (Interleaved) =====\n" + code_report + "\n\n"
-    
+
     db_report = ""
     if db_option.get() == "sqlite":
         if sqlite_file_path:
