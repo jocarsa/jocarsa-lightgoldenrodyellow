@@ -15,7 +15,7 @@ except ImportError:
 # --- Funciones para el análisis del proyecto ---
 
 ALLOWED_EXTENSIONS = ('.html', '.css', '.js', '.php', '.py', '.java')
-EXCLUDED_DIRS = {'.git', 'node_modules'}
+EXCLUDED_DIRS = {'.git', 'node_modules','dist'}
 
 def build_directory_map(root_path):
     """Construye un mapa de directorios en forma de árbol."""
