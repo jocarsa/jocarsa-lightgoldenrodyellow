@@ -1,583 +1,926 @@
 import os
+import re
 import json
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import tkinter.font as tkfont
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import sqlite3
 
-# For MySQL support, ensure you have pymysql installed (pip install pymysql)
+# Soporte opcional para MySQL (pip install pymysql)
 try:
     import pymysql
 except ImportError:
     pymysql = None
 
-# --- Configuraciones ---
-ALLOWED_EXTENSIONS = ('.html', '.css', '.js', '.php', '.py', '.java', '.sql','.c','.cpp','.cu','.h','.json')
-EXCLUDED_DIRS = {'.git', 'node_modules', 'vendor'}
+# =========================
+# Configuración / Constantes (valores por defecto)
+# =========================
+CONFIG_FILE = "config.json"
 
-# --- NUEVA FUNCIÓN: Reporte intercalado (Interleaved) ---
-def generate_interleaved_report(root_path, depth=1):
+EXTENSIONES_PERMITIDAS_DEF = [
+    '.html', '.css', '.js', '.php', '.py', '.java', '.sql',
+    '.c', '.cpp', '.cu', '.h', '.json'
+]
+CARPETAS_EXCLUIDAS_DEF = [
+    '.git', 'node_modules', 'vendor', 'venv', '__pycache__',
+    'modelo_entrenado', '.venv', '__pycache__'
+]
+
+# Estas variables se sobreescriben al cargar config.json
+EXTENSIONES_PERMITIDAS = tuple(EXTENSIONES_PERMITIDAS_DEF)
+CARPETAS_EXCLUIDAS = set(CARPETAS_EXCLUIDAS_DEF)
+
+# =========================
+# Utilidades de persistencia
+# =========================
+def cargar_config():
+    """Carga el JSON de configuración; crea estructura por defecto si falta."""
+    cfg = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+
+    # Asegurar claves mínimas
+    cfg.setdefault("ultima_carpeta_codigo", "")
+    cfg.setdefault("ultima_carpeta_guardar", "")
+    cfg.setdefault("ultima_carpeta_sqlite", "")
+    cfg.setdefault("sqlite_file", "")
+    cfg.setdefault("mysql", {"server": "", "user": "", "password": "", "database": ""})
+    cfg.setdefault("extensiones_permitidas", EXTENSIONES_PERMITIDAS_DEF)
+    cfg.setdefault("carpetas_excluidas", CARPETAS_EXCLUIDAS_DEF)
+    cfg.setdefault("mostrar_bienvenida", True)
+    return cfg
+
+def guardar_config(**kwargs):
+    """Actualiza config.json con las claves dadas."""
+    cfg = cargar_config()
+    for k, v in kwargs.items():
+        cfg[k] = v
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    _aplicar_config_a_variables(cfg)
+
+def _aplicar_config_a_variables(cfg):
+    """Sincroniza variables globales desde cfg."""
+    global EXTENSIONES_PERMITIDAS, CARPETAS_EXCLUIDAS
+    exts = cfg.get("extensiones_permitidas", EXTENSIONES_PERMITIDAS_DEF)
+    # Normalizar: asegurar que empiecen por punto
+    exts_norm = []
+    for e in exts:
+        e = e.strip()
+        if not e:
+            continue
+        if not e.startswith('.'):
+            e = '.' + e
+        exts_norm.append(e.lower())
+    EXTENSIONES_PERMITIDAS = tuple(sorted(set(exts_norm)))
+
+    excl = cfg.get("carpetas_excluidas", CARPETAS_EXCLUIDAS_DEF)
+    CARPETAS_EXCLUIDAS = set([c.strip() for c in excl if c.strip()])
+
+# Cargar configuración al inicio y aplicarla
+cfg = cargar_config()
+_aplicar_config_a_variables(cfg)
+
+# =========================
+# Generadores de reportes
+# =========================
+def construir_mapa_directorios(ruta_raiz):
+    """Construye un árbol de directorios en texto."""
+    lineas = []
+    raiz_abs = os.path.abspath(ruta_raiz)
+    lineas.append(raiz_abs)
+
+    def interno(dir_path, prefijo=""):
+        try:
+            entradas = sorted(os.listdir(dir_path))
+        except Exception:
+            return
+        entradas = [
+            e for e in entradas
+            if not (os.path.isdir(os.path.join(dir_path, e)) and e in CARPETAS_EXCLUIDAS)
+        ]
+        for i, entrada in enumerate(entradas):
+            ruta_completa = os.path.join(dir_path, entrada)
+            conector = "└── " if i == len(entradas) - 1 else "├── "
+            lineas.append(prefijo + conector + entrada)
+            if os.path.isdir(ruta_completa):
+                extension = "    " if i == len(entradas) - 1 else "│   "
+                interno(ruta_completa, prefijo + extension)
+    interno(ruta_raiz)
+    return "\n".join(lineas)
+
+def generar_reporte_intercalado(ruta_raiz, nivel=1):
     """
-    Genera un reporte en Markdown intercalando:
-      - Un encabezado para cada carpeta basado en su profundidad.
-      - Dentro de cada carpeta, se listan los archivos permitidos con su nombre en negrita y su contenido en bloques de código.
+    Reporte Markdown intercalado por carpetas, con encabezados por nivel y
+    bloques de código por archivo permitido.
     """
-    # Mapeo de extensiones a etiquetas para bloques de código Markdown.
-    lang_mapping = {
+    lang_map = {
         '.html': 'html',
         '.css': 'css',
         '.js': 'js',
         '.php': 'php',
         '.py': 'python',
         '.java': 'java',
-        '.sql': 'sql'
+        '.sql': 'sql',
+        '.c': 'c',
+        '.cpp': 'cpp',
+        '.cu': 'cuda',
+        '.h': 'c',
+        '.json': 'json',
     }
-    report_lines = []
-    folder_name = os.path.basename(root_path) if os.path.basename(root_path) else root_path
-    header = "#" * depth  # Un "#" por cada nivel de profundidad.
-    report_lines.append(f"{header} {folder_name}")
-    
-    # Listar el contenido de la carpeta
+    lineas = []
+    nombre_carpeta = os.path.basename(ruta_raiz) if os.path.basename(ruta_raiz) else ruta_raiz
+    encabezado = "#" * nivel
+    lineas.append(f"{encabezado} {nombre_carpeta}")
+
+    # Listado de entradas
     try:
-        entries = sorted(os.listdir(root_path))
+        entradas = sorted(os.listdir(ruta_raiz))
     except Exception as e:
-        report_lines.append(f"Error listando la carpeta: {e}")
-        return "\n".join(report_lines)
-    
-    # Procesar archivos permitidos en la carpeta actual.
-    for entry in entries:
-        full_path = os.path.join(root_path, entry)
-        if os.path.isfile(full_path) and entry.lower().endswith(ALLOWED_EXTENSIONS):
-            extension = os.path.splitext(entry)[1].lower()
-            language = lang_mapping.get(extension, '')
-            report_lines.append(f"**{entry}**")
+        lineas.append(f"Error listando la carpeta: {e}")
+        return "\n".join(lineas)
+
+    # Archivos permitidos en carpeta actual
+    for entrada in entradas:
+        ruta_completa = os.path.join(ruta_raiz, entrada)
+        if os.path.isfile(ruta_completa) and entrada.lower().endswith(EXTENSIONES_PERMITIDAS):
+            extension = os.path.splitext(entrada)[1].lower()
+            lenguaje = lang_map.get(extension, '')
+            lineas.append(f"**{entrada}**")
             try:
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
+                with open(ruta_completa, 'r', encoding='utf-8', errors='ignore') as f:
+                    contenido = f.read()
             except Exception as e:
-                content = f"Error al leer el archivo: {e}"
-            report_lines.append(f"```{language}")
-            report_lines.append(content)
-            report_lines.append("```")
-    
-    # Procesar subdirectorios (evitando los que estén en EXCLUDED_DIRS)
-    for entry in entries:
-        full_path = os.path.join(root_path, entry)
-        if os.path.isdir(full_path) and entry not in EXCLUDED_DIRS:
-            report_lines.append(generate_interleaved_report(full_path, depth + 1))
-    
-    return "\n".join(report_lines)
+                contenido = f"Error al leer el archivo: {e}"
+            lineas.append(f"```{lenguaje}")
+            lineas.append(contenido)
+            lineas.append("```")
 
-# --- Funciones originales para análisis de código (para otros usos) ---
-def build_directory_map(root_path):
-    """Construye un mapa de directorios en forma de árbol."""
-    lines = []
-    root_abs = os.path.abspath(root_path)
-    lines.append(root_abs)
+    # Subdirectorios (excluyendo los filtrados)
+    for entrada in entradas:
+        ruta_completa = os.path.join(ruta_raiz, entrada)
+        if os.path.isdir(ruta_completa) and entrada not in CARPETAS_EXCLUIDAS:
+            lineas.append(generar_reporte_intercalado(ruta_completa, nivel + 1))
 
-    def inner(dir_path, prefix=""):
-        try:
-            entries = sorted(os.listdir(dir_path))
-        except Exception:
-            return
-        entries = [e for e in entries if not (os.path.isdir(os.path.join(dir_path, e)) and e in EXCLUDED_DIRS)]
-        for i, entry in enumerate(entries):
-            full_path = os.path.join(dir_path, entry)
-            connector = "└── " if i == len(entries) - 1 else "├── "
-            lines.append(prefix + connector + entry)
-            if os.path.isdir(full_path):
-                extension = "    " if i == len(entries) - 1 else "│   "
-                inner(full_path, prefix + extension)
-    inner(root_path)
-    return "\n".join(lines)
+    return "\n".join(lineas)
 
-def parse_files(root_path):
-    """Recorre la carpeta y obtiene el contenido de archivos con extensiones permitidas."""
-    parsed_files = []
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
-        for filename in filenames:
-            if filename.lower().endswith(ALLOWED_EXTENSIONS):
-                file_path = os.path.join(dirpath, filename)
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                except Exception as e:
-                    content = f"Error reading file: {e}"
-                parsed_files.append((file_path, content))
-    return parsed_files
-
-def generate_code_report(root_path):
-    """Genera un reporte con el mapa de directorios y el contenido de archivos en formato Markdown."""
-    report_lines = []
-    report_lines.append("### Project Directory Map")
-    report_lines.append("```")
-    report_lines.append(build_directory_map(root_path))
-    report_lines.append("```")
-    report_lines.append("\n### Parsed Files\n")
-    parsed_files = parse_files(root_path)
-    lang_mapping = {
-        '.html': 'html',
-        '.css': 'css',
-        '.js': 'js',
-        '.php': 'php',
-        '.py': 'python',
-        '.java': 'java'
-    }
-    for file_path, content in parsed_files:
-        filename = os.path.basename(file_path)
-        extension = os.path.splitext(filename)[1].lower()
-        language = lang_mapping.get(extension, '')
-        report_lines.append(f"**{filename}**")
-        report_lines.append(f"```{language}")
-        report_lines.append(content)
-        report_lines.append("```")
-    return "\n".join(report_lines)
-
-def generate_folder_titles(root_path):
-    """
-    Genera una jerarquía de títulos en Markdown basada en la estructura de carpetas.
-    """
-    markdown_lines = []
-    for current_root, dirs, _ in os.walk(root_path):
-        rel_path = os.path.relpath(current_root, root_path)
-        if rel_path == '.':
-            continue
-        depth = len(rel_path.split(os.sep))
-        heading = "#" * depth
-        folder_name = os.path.basename(current_root)
-        markdown_lines.append(f"{heading} {folder_name}")
-    return "\n".join(markdown_lines)
-
-# --- Funciones para análisis de base de datos ---
-def analyze_sqlite_database(db_path):
-    """Analiza una base de datos SQLite y devuelve su estructura (tablas y columnas)."""
-    db_details = f"SQLite Database: {db_path}\n"
+# =========================
+# Análisis de bases de datos
+# =========================
+def analizar_sqlite(db_path):
+    """Devuelve estructura de tablas/columnas de una base SQLite."""
+    detalles = [f"SQLite: {db_path}"]
     try:
         conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = cursor.fetchall()
-        table_details = []
-        for table in tables:
-            table_name = table[0]
-            table_details.append(f"    Table: {table_name}")
-            cursor.execute(f"PRAGMA table_info({table_name});")
-            columns = cursor.fetchall()
-            for col in columns:
-                table_details.append(f"        Column: {col[1]} ({col[2]})")
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tablas = [t[0] for t in cur.fetchall()]
+        for t in tablas:
+            detalles.append(f"    Tabla: {t}")
+            cur.execute(f"PRAGMA table_info({t});")
+            for col in cur.fetchall():
+                detalles.append(f"        Columna: {col[1]} ({col[2]})")
         conn.close()
-        db_details += "\n".join(table_details)
-    except Exception as e:
-        db_details += f"\n    Error reading SQLite database: {e}"
-    return db_details
+    except Exception:
+        return None
+    return "\n".join(detalles)
 
-def analyze_mysql_database(server, user, password, database):
-    """Analiza una base de datos MySQL y devuelve su estructura (tablas y columnas)."""
-    db_details = f"MySQL Database on {server} - {database}\n"
+def analizar_mysql(servidor, usuario, contrasena, bd):
+    """Devuelve estructura de tablas/columnas de MySQL."""
     if pymysql is None:
-        return db_details + "    pymysql no está instalado."
+        return None
+    detalles = [f"MySQL en {servidor} - {bd}"]
     try:
-        conn = pymysql.connect(host=server, user=user, password=password, database=database)
-        cursor = conn.cursor()
-        cursor.execute("SHOW TABLES;")
-        tables = cursor.fetchall()
-        table_details = []
-        for table in tables:
-            table_name = table[0]
-            table_details.append(f"    Table: {table_name}")
-            cursor.execute(f"SHOW COLUMNS FROM {table_name};")
-            columns = cursor.fetchall()
-            for col in columns:
-                table_details.append(f"        Column: {col[0]} ({col[1]})")
+        conn = pymysql.connect(host=servidor, user=usuario, password=contrasena, database=bd)
+        cur = conn.cursor()
+        cur.execute("SHOW TABLES;")
+        tablas = [t[0] for t in cur.fetchall()]
+        for t in tablas:
+            detalles.append(f"    Tabla: {t}")
+            cur.execute(f"SHOW COLUMNS FROM `{t}`;")
+            for col in cur.fetchall():
+                detalles.append(f"        Columna: {col[0]} ({col[1]})")
         conn.close()
-        db_details += "\n".join(table_details)
-    except Exception as e:
-        db_details += f"\n    Error connecting/reading MySQL database: {e}"
-    return db_details
+        return "\n".join(detalles)
+    except Exception:
+        return None
 
-# --- Variables Globales ---
-selected_project_folder = None  # Carpeta del proyecto
-sqlite_file_path = ""           # Archivo SQLite seleccionado
+# =========================
+# Estado global (UI)
+# =========================
+carpeta_proyecto = cfg.get("ultima_carpeta_codigo", "") or None
+sqlite_path = cfg.get("sqlite_file", "")
 
-# --- Funciones para la selección de carpeta y base de datos ---
-def select_project_folder():
-    """Permite seleccionar la carpeta del proyecto y guarda la ruta."""
-    global selected_project_folder
-    # Load the last used folder from the configuration file
-    last_used_paths = load_last_used_paths()
-    initial_dir = last_used_paths.get("last_code_folder", os.getcwd())
+# =========================
+# Helpers UI
+# =========================
+def toast(titulo, mensaje):
+    try:
+        ttk.ToastNotification(title=titulo, message=mensaje, duration=3000, position=ttk.POSITION_BOTTOM_RIGHT).show_toast()
+    except Exception:
+        messagebox.showinfo(titulo, mensaje)
 
-    folder = filedialog.askdirectory(title="Selecciona carpeta del proyecto", initialdir=initial_dir)
-    if folder:
-        selected_project_folder = folder
-        save_last_used_paths(code_folder=folder)
-        messagebox.showinfo("Carpeta seleccionada", f"Carpeta seleccionada:\n{folder}")
-    return folder
+def set_status(texto):
+    var_status.set(texto)
+
+# =========================
+# Splash / Bienvenida
+# =========================
+def mostrar_bienvenida():
+    if not cfg.get("mostrar_bienvenida", True):
+        return
+
+    top = ttk.Toplevel(root)
+    top.title("Bienvenido")
+    top.resizable(False, False)
+    top.transient(root)
+    top.grab_set()
+    # Centrar
+    w, h = 520, 360
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    x, y = (sw - w) // 2, (sh - h) // 3
+    top.geometry(f"{w}x{h}+{x}+{y}")
+
+    cont = ttk.Frame(top, padding=20)
+    cont.pack(fill=tk.BOTH, expand=True)
+
+    # Logo
+    try:
+        img = tk.PhotoImage(file="lightgoldenrodyellow.png")
+        lbl_logo = ttk.Label(cont, image=img)
+        lbl_logo.image = img
+        lbl_logo.pack(pady=(0, 10))
+    except Exception:
+        ttk.Label(cont, text="Generador de Prompt", font=("Helvetica", 18, "bold")).pack(pady=(0, 10))
+
+    ttk.Label(
+        cont,
+        text="Bienvenido/a al Generador de Prompt.\nConfigura tu proyecto, ajusta las extensiones y genera prompts con análisis automático.",
+        justify="center"
+    ).pack(pady=6)
+
+    var_no_mostrar = tk.BooleanVar(value=False)
+    ttk.Checkbutton(cont, text="No volver a mostrar", variable=var_no_mostrar).pack(pady=4)
+
+    botones = ttk.Frame(cont)
+    botones.pack(pady=10)
+    def _abrir():
+        seleccionar_carpeta_proyecto()
+        if var_no_mostrar.get():
+            guardar_config(mostrar_bienvenida=False)
+        top.destroy()
+
+    def _empezar():
+        if var_no_mostrar.get():
+            guardar_config(mostrar_bienvenida=False)
+        top.destroy()
+
+    ttk.Button(botones, text="Abrir proyecto…", bootstyle=PRIMARY, command=_abrir).pack(side=tk.LEFT, padx=6)
+    ttk.Button(botones, text="Empezar", command=_empezar).pack(side=tk.LEFT, padx=6)
+
+# =========================
+# Lógica de UI principal
+# =========================
+def seleccionar_carpeta_proyecto():
+    global carpeta_proyecto
+    cfg_local = cargar_config()
+    inicial = cfg_local.get("ultima_carpeta_codigo") or os.getcwd()
+    carpeta = filedialog.askdirectory(
+        title="Selecciona la carpeta del proyecto",
+        initialdir=inicial
+    )
+    if carpeta:
+        carpeta_proyecto = carpeta
+        guardar_config(ultima_carpeta_codigo=carpeta_proyecto)
+        lbl_carpeta["text"] = carpeta_proyecto
+        toast("Carpeta seleccionada", f"Has seleccionado:\n{carpeta_proyecto}")
 
 def seleccionar_sqlite():
-    """Permite seleccionar un archivo SQLite (.db, .sqlite, .sqlite3)."""
-    global sqlite_file_path
-    file_path = filedialog.askopenfilename(
-        title="Selecciona archivo SQLite",
-        filetypes=[("SQLite Database", "*.sqlite *.db *.sqlite3"), ("Todos los archivos", "*.*")]
+    global sqlite_path
+    cfg_local = cargar_config()
+    inicial = cfg_local.get("ultima_carpeta_sqlite") or os.getcwd()
+    ruta = filedialog.askopenfilename(
+        title="Selecciona un archivo SQLite",
+        initialdir=inicial,
+        filetypes=[("SQLite", "*.sqlite *.db *.sqlite3"), ("Todos los archivos", "*.*")]
     )
-    if file_path:
-        sqlite_file_path = file_path
-        save_last_used_paths(db_folder=os.path.dirname(file_path))
-        lbl_sqlite.config(text=os.path.basename(file_path))
+    if ruta:
+        sqlite_path = ruta
+        guardar_config(sqlite_file=sqlite_path, ultima_carpeta_sqlite=os.path.dirname(sqlite_path))
+        lbl_sqlite["text"] = os.path.basename(sqlite_path)
+        toast("Base de datos SQLite", f"Archivo seleccionado:\n{sqlite_path}")
 
-def toggle_db_options():
-    """Muestra u oculta campos según la opción de base de datos seleccionada."""
-    if db_option.get() == "sqlite":
-        frame_sqlite.pack(fill=tk.X, pady=5)
-        frame_mysql.pack_forget()
+def alternar_opciones_bd():
+    if var_bd.get() == "sqlite":
+        marco_sqlite.pack(fill=tk.X, pady=5)
+        marco_mysql.pack_forget()
     else:
-        frame_sqlite.pack_forget()
-        frame_mysql.pack(fill=tk.X, pady=5)
+        marco_sqlite.pack_forget()
+        marco_mysql.pack(fill=tk.X, pady=5)
 
-def test_db_connection():
-    """Conecta a la base de datos seleccionada y muestra su estructura (tablas y columnas)."""
-    if db_option.get() == "sqlite":
-        if sqlite_file_path:
-            db_report = analyze_sqlite_database(sqlite_file_path)
-            messagebox.showinfo("SQLite DB Structure", db_report)
+def probar_conexion_bd():
+    if var_bd.get() == "sqlite":
+        if sqlite_path and os.path.isfile(sqlite_path):
+            reporte = analizar_sqlite(sqlite_path)
+            if reporte:
+                messagebox.showinfo("Estructura SQLite", reporte)
+            else:
+                messagebox.showwarning("SQLite", "No se pudo leer la base de datos seleccionada.")
         else:
-            messagebox.showwarning("No SQLite File", "Por favor, selecciona un archivo SQLite.")
+            messagebox.showwarning("SQLite", "Selecciona primero un archivo SQLite válido.")
     else:
-        server = entry_mysql_server.get().strip()
-        user = entry_mysql_user.get().strip()
-        password = entry_mysql_pass.get().strip()
-        database = entry_mysql_db.get().strip()
-        if not (server and user and password and database):
-            messagebox.showwarning("Campos incompletos", "Por favor, completa todos los campos de conexión MySQL.")
+        servidor = ent_mysql_servidor.get().strip()
+        usuario = ent_mysql_usuario.get().strip()
+        contrasena = ent_mysql_contrasena.get().strip()
+        bd = ent_mysql_bd.get().strip()
+        if not (servidor and usuario and contrasena and bd):
+            messagebox.showwarning("MySQL", "Completa todos los campos de conexión.")
             return
-        save_last_used_paths(mysql_data={"server": server, "user": user, "password": password, "database": database})
-        db_report = analyze_mysql_database(server, user, password, database)
-        messagebox.showinfo("MySQL DB Structure", db_report)
+        guardar_config(mysql={"server": servidor, "user": usuario,
+                              "password": contrasena, "database": bd})
+        reporte = analizar_mysql(servidor, usuario, contrasena, bd)
+        if reporte:
+            messagebox.showinfo("Estructura MySQL", reporte)
+        else:
+            messagebox.showwarning("MySQL", "No se pudo conectar o leer la base de datos.")
 
-def save_mysql_data():
-    """Guarda los datos de conexión MySQL al perder el foco en cualquier campo."""
-    server = entry_mysql_server.get().strip()
-    user = entry_mysql_user.get().strip()
-    password = entry_mysql_pass.get().strip()
-    database = entry_mysql_db.get().strip()
-    save_last_used_paths(mysql_data={"server": server, "user": user, "password": password, "database": database})
+def guardar_datos_mysql_si_cambian(*_):
+    servidor = ent_mysql_servidor.get().strip()
+    usuario = ent_mysql_usuario.get().strip()
+    contrasena = ent_mysql_contrasena.get().strip()
+    bd = ent_mysql_bd.get().strip()
+    guardar_config(mysql={"server": servidor, "user": usuario,
+                          "password": contrasena, "database": bd})
 
-# --- Funciones para generar el prompt ---
 def generar_prompt():
-    """Genera el prompt usando los datos del formulario, la estructura del proyecto y el reporte intercalado."""
-    prompt = "Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar:\n\n"
-    
-    # Recopilar datos del formulario
-    contexto = txt_contexto.get("1.0", tk.END).strip()
-    objetivo = txt_objetivo.get("1.0", tk.END).strip()
-    restricciones = txt_restricciones.get("1.0", tk.END).strip()
-    formato_salida = txt_formato.get("1.0", tk.END).strip()
-    
-    if contexto:
-        prompt += f"Contexto: {contexto}\n\n"
-    if objetivo:
-        prompt += f"Objetivo: {objetivo}\n\n"
-    if restricciones:
-        prompt += f"Restricciones: {restricciones}\n\n"
-    if formato_salida:
-        prompt += f"Formato de salida: {formato_salida}\n\n"
-    
-    # Agregar la estructura del proyecto en forma de árbol
-    if selected_project_folder:
-        structure_tree = build_directory_map(selected_project_folder)
-        prompt += "\n===== Project Structure =====\n"
-        prompt += "```\n" + structure_tree + "\n```\n\n"
-    
-        # Agregar reporte del código intercalado
-        interleaved_report = generate_interleaved_report(selected_project_folder)
-        prompt += "\n===== Code Report (Interleaved) =====\n" + interleaved_report + "\n\n"
-    else:
-        prompt += "\n(No se ha seleccionado carpeta del proyecto para análisis de código)\n\n"
-    
-    # Agregar reporte de base de datos (si se ha seleccionado)
-    db_report = ""
-    if db_option.get() == "sqlite":
-        if sqlite_file_path:
-            db_report = analyze_sqlite_database(sqlite_file_path)
-    else:
-        server = entry_mysql_server.get().strip()
-        user = entry_mysql_user.get().strip()
-        password = entry_mysql_pass.get().strip()
-        database = entry_mysql_db.get().strip()
-        if server and user and password and database:
-            db_report = analyze_mysql_database(server, user, password, database)
-    if db_report:
-        prompt += "\n===== Database Report =====\n" + db_report
-    
-    txt_prompt_output.config(state=tk.NORMAL)
-    txt_prompt_output.delete("1.0", tk.END)
-    txt_prompt_output.insert(tk.END, prompt)
-    txt_prompt_output.config(state=tk.DISABLED)
+    """
+    Genera el prompt final en base a:
+      - Contexto, Objetivo, Restricciones, Formato de salida
+      - Estructura del proyecto
+      - Reporte intercalado de código
+      - Informe de base de datos SOLO si hay una BD válida seleccionada
+    """
+    prompt = ""
 
-def generar_prompt_for_folder(project_folder):
-    """Genera el prompt para un folder específico (usado para proyectos 'jocarsa-')."""
-    prompt = "Crea / modifica un software informático en base a los parámetros que a continuación te voy a indicar:\n\n"
-    
+    # Datos del formulario
     contexto = txt_contexto.get("1.0", tk.END).strip()
     objetivo = txt_objetivo.get("1.0", tk.END).strip()
     restricciones = txt_restricciones.get("1.0", tk.END).strip()
-    formato_salida = txt_formato.get("1.0", tk.END).strip()
-    
+    formato = txt_formato.get("1.0", tk.END).strip()
+
     if contexto:
         prompt += f"Contexto: {contexto}\n\n"
     if objetivo:
         prompt += f"Objetivo: {objetivo}\n\n"
     if restricciones:
         prompt += f"Restricciones: {restricciones}\n\n"
-    if formato_salida:
-        prompt += f"Formato de salida: {formato_salida}\n\n"
-    
-    # Estructura del proyecto y reporte intercalado para el folder específico.
-    structure_tree = build_directory_map(project_folder)
-    prompt += "\n===== Project Structure =====\n"
-    prompt += "```\n" + structure_tree + "\n```\n\n"
-    
-    code_report = generate_interleaved_report(project_folder)
-    prompt += "\n===== Code Report (Interleaved) =====\n" + code_report + "\n\n"
-    
-    db_report = ""
-    if db_option.get() == "sqlite":
-        if sqlite_file_path:
-            db_report = analyze_sqlite_database(sqlite_file_path)
+    if formato:
+        prompt += f"Formato de salida: {formato}\n\n"
+
+    # Estructura + código intercalado
+    if carpeta_proyecto:
+        arbol = construir_mapa_directorios(carpeta_proyecto)
+        prompt += "\n===== Estructura del proyecto =====\n"
+        prompt += "```\n" + arbol + "\n```\n\n"
+
+        intercalado = generar_reporte_intercalado(carpeta_proyecto)
+        prompt += "\n===== Reporte de código (Intercalado) =====\n" + intercalado + "\n\n"
     else:
-        server = entry_mysql_server.get().strip()
-        user = entry_mysql_user.get().strip()
-        password = entry_mysql_pass.get().strip()
-        database = entry_mysql_db.get().strip()
-        if server and user and password and database:
-            db_report = analyze_mysql_database(server, user, password, database)
-    if db_report:
-        prompt += "\n===== Database Report =====\n" + db_report
+        prompt += "\n(No se ha seleccionado carpeta de proyecto para analizar código)\n\n"
+
+    # Informe de base de datos SOLO si procede
+    informe_bd = ""
+    if var_bd.get() == "sqlite":
+        if sqlite_path and os.path.isfile(sqlite_path):
+            rep = analizar_sqlite(sqlite_path)
+            if rep:
+                informe_bd = rep
+    else:
+        servidor = ent_mysql_servidor.get().strip()
+        usuario = ent_mysql_usuario.get().strip()
+        contrasena = ent_mysql_contrasena.get().strip()
+        bd = ent_mysql_bd.get().strip()
+        if servidor and usuario and contrasena and bd:
+            rep = analizar_mysql(servidor, usuario, contrasena, bd)
+            if rep:
+                informe_bd = rep
+
+    if informe_bd:
+        prompt += "\n===== Informe de base de datos =====\n" + informe_bd
+
+    # Volcado a la UI (siempre almacenamos el Markdown crudo en txt_salida_raw)
+    txt_salida_raw.config(state=tk.NORMAL)
+    txt_salida_raw.delete("1.0", tk.END)
+    txt_salida_raw.insert(tk.END, prompt)
+    txt_salida_raw.config(state=tk.DISABLED)
+
+    # Actualizar la vista según el modo
+    actualizar_vista_salida()
+    set_status("Prompt generado correctamente.")
+
+def generar_prompt_para_carpeta(carpeta):
+    """Igual que generar_prompt() pero para una subcarpeta concreta (jocarsa-...)."""
+    prompt = ""
+
+    contexto = txt_contexto.get("1.0", tk.END).strip()
+    objetivo = txt_objetivo.get("1.0", tk.END).strip()
+    restricciones = txt_restricciones.get("1.0", tk.END).strip()
+    formato = txt_formato.get("1.0", tk.END).strip()
+
+    if contexto:
+        prompt += f"Contexto: {contexto}\n\n"
+    if objetivo:
+        prompt += f"Objetivo: {objetivo}\n\n"
+    if restricciones:
+        prompt += f"Restricciones: {restricciones}\n\n"
+    if formato:
+        prompt += f"Formato de salida: {formato}\n\n"
+
+    arbol = construir_mapa_directorios(carpeta)
+    prompt += "\n===== Estructura del proyecto =====\n"
+    prompt += "```\n" + arbol + "\n```\n\n"
+
+    intercalado = generar_reporte_intercalado(carpeta)
+    prompt += "\n===== Reporte de código (Intercalado) =====\n" + intercalado + "\n\n"
+
+    # Informe de BD (solo si válido)
+    informe_bd = ""
+    if var_bd.get() == "sqlite":
+        if sqlite_path and os.path.isfile(sqlite_path):
+            rep = analizar_sqlite(sqlite_path)
+            if rep:
+                informe_bd = rep
+    else:
+        servidor = ent_mysql_servidor.get().strip()
+        usuario = ent_mysql_usuario.get().strip()
+        contrasena = ent_mysql_contrasena.get().strip()
+        bd = ent_mysql_bd.get().strip()
+        if servidor and usuario and contrasena and bd:
+            rep = analizar_mysql(servidor, usuario, contrasena, bd)
+            if rep:
+                informe_bd = rep
+    if informe_bd:
+        prompt += "\n===== Informe de base de datos =====\n" + informe_bd
+
     return prompt
 
-def copy_report():
-    report_text = txt_prompt_output.get("1.0", tk.END)
+def copiar_reporte():
+    # Copia del Markdown crudo (modo fuente)
+    texto = txt_salida_raw.get("1.0", tk.END)
     root.clipboard_clear()
-    root.clipboard_append(report_text)
-    messagebox.showinfo("Portapapeles", "Reporte copiado al portapapeles.")
+    root.clipboard_append(texto)
+    toast("Copiado", "El reporte (Markdown) se ha copiado al portapapeles.")
+    set_status("Reporte copiado al portapapeles.")
 
-def save_report():
-    report_text = txt_prompt_output.get("1.0", tk.END)
-    file_path = filedialog.asksaveasfilename(
+def guardar_reporte():
+    cfg_local = cargar_config()
+    inicial = cfg_local.get("ultima_carpeta_guardar") or (carpeta_proyecto or os.getcwd())
+    texto = txt_salida_raw.get("1.0", tk.END)
+    ruta = filedialog.asksaveasfilename(
+        title="Guardar reporte",
+        initialdir=inicial,
         defaultextension=".txt",
-        filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+        filetypes=[("Texto", "*.txt"), ("Todos los archivos", "*.*")]
     )
-    if file_path:
+    if ruta:
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(report_text)
-            messagebox.showinfo("Guardar Reporte", f"Reporte guardado en:\n{file_path}")
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(texto)
+            guardar_config(ultima_carpeta_guardar=os.path.dirname(ruta))
+            toast("Guardado", f"Reporte guardado en:\n{ruta}")
+            set_status("Reporte guardado.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar el reporte: {e}")
 
-def load_last_used_paths():
-    """Carga las rutas usadas anteriormente desde un archivo JSON."""
-    config_path = "config.json"
-    if os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_last_used_paths(code_folder=None, db_folder=None, mysql_data=None):
-    """Guarda las rutas usadas en un archivo JSON."""
-    config_path = "config.json"
-    config = load_last_used_paths()
-    if code_folder:
-        config["last_code_folder"] = code_folder
-    if db_folder:
-        config["last_db_folder"] = db_folder
-    if mysql_data:
-        config["mysql"] = mysql_data
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
-
-def save_prompts_for_jocarsa_projects():
-    """
-    Busca subcarpetas que comiencen con 'jocarsa-' en la carpeta seleccionada y guarda el prompt
-    en la carpeta 'prompts' (creada junto al script) con el nombre de cada folder.
-    """
-    if not selected_project_folder:
-        messagebox.showwarning("No folder selected", "Por favor, selecciona una carpeta del proyecto primero.")
+def guardar_prompts_para_jocarsa():
+    if not carpeta_proyecto:
+        messagebox.showwarning("Carpeta no seleccionada",
+                               "Selecciona primero la carpeta contenedora de proyectos.")
         return
-
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    prompts_folder = os.path.join(script_dir, "prompts")
-    if not os.path.exists(prompts_folder):
-        os.makedirs(prompts_folder)
+    carpeta_prompts = os.path.join(script_dir, "prompts")
+    os.makedirs(carpeta_prompts, exist_ok=True)
 
-    saved_count = 0
-    for entry in os.listdir(selected_project_folder):
-        full_path = os.path.join(selected_project_folder, entry)
-        if os.path.isdir(full_path) and entry.startswith("jocarsa-"):
-            prompt_text = generar_prompt_for_folder(full_path)
-            file_path = os.path.join(prompts_folder, entry + ".txt")
+    guardados = 0
+    for entrada in os.listdir(carpeta_proyecto):
+        ruta = os.path.join(carpeta_proyecto, entrada)
+        if os.path.isdir(ruta) and entrada.startswith("jocarsa-"):
+            texto_prompt = generar_prompt_para_carpeta(ruta)
+            destino = os.path.join(carpeta_prompts, entrada + ".txt")
             try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(prompt_text)
-                saved_count += 1
+                with open(destino, "w", encoding="utf-8") as f:
+                    f.write(texto_prompt)
+                guardados += 1
             except Exception as e:
-                print(f"Error al guardar prompt en {entry}: {e}")
-    if saved_count > 0:
-        messagebox.showinfo("Prompts guardados", f"Prompts guardados para {saved_count} proyecto(s) en la carpeta 'prompts'.")
-    else:
-        messagebox.showinfo("Sin proyectos", "No se encontraron carpetas que comiencen con 'jocarsa-'.")
+                print(f"Error al guardar prompt en {entrada}: {e}")
 
-# --- Configuración de la ventana principal ---
-style = ttk.Style('flatly')
+    if guardados > 0:
+        toast("Prompts guardados", f"Se han guardado {guardados} prompt(s) en 'prompts'.")
+        set_status(f"{guardados} prompts guardados en /prompts.")
+    else:
+        messagebox.showinfo("Sin proyectos", "No se encontraron carpetas que comiencen por 'jocarsa-'.")
+
+# =========================
+# Ventana de configuración (extensiones y carpetas excluidas)
+# =========================
+def abrir_config_ext_y_excluidas():
+    cfg_local = cargar_config()
+
+    top = ttk.Toplevel(root)
+    top.title("Configuración: Extensiones y carpetas excluidas")
+    top.geometry("700x500")
+    top.transient(root)
+    top.grab_set()
+
+    frame = ttk.Frame(top, padding=12)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    cols = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
+    cols.pack(fill=tk.BOTH, expand=True)
+
+    # Panel extensiones
+    panel_ext = ttk.Labelframe(cols, text="Extensiones permitidas (una por línea)", padding=10)
+    cols.add(panel_ext, weight=1)
+    txt_ext = tk.Text(panel_ext, height=10, wrap="word")
+    txt_ext.pack(fill=tk.BOTH, expand=True)
+
+    # Cargar extensiones actuales
+    exts = cfg_local.get("extensiones_permitidas", EXTENSIONES_PERMITIDAS_DEF)
+    txt_ext.delete("1.0", tk.END)
+    txt_ext.insert(tk.END, "\n".join(exts))
+
+    # Panel carpetas excluidas
+    panel_exc = ttk.Labelframe(cols, text="Carpetas excluidas (una por línea)", padding=10)
+    cols.add(panel_exc, weight=1)
+    txt_exc = tk.Text(panel_exc, height=10, wrap="word")
+    txt_exc.pack(fill=tk.BOTH, expand=True)
+
+    excs = cfg_local.get("carpetas_excluidas", CARPETAS_EXCLUIDAS_DEF)
+    txt_exc.delete("1.0", tk.END)
+    txt_exc.insert(tk.END, "\n".join(excs))
+
+    # Barra de acciones
+    barra = ttk.Frame(frame)
+    barra.pack(fill=tk.X, pady=10)
+
+    def restaurar_por_defecto():
+        txt_ext.delete("1.0", tk.END)
+        txt_ext.insert(tk.END, "\n".join(EXTENSIONES_PERMITIDAS_DEF))
+        txt_exc.delete("1.0", tk.END)
+        txt_exc.insert(tk.END, "\n".join(CARPETAS_EXCLUIDAS_DEF))
+
+    def guardar_cambios():
+        nuevas_exts = [l.strip() for l in txt_ext.get("1.0", tk.END).splitlines() if l.strip()]
+        nuevas_excs = [l.strip() for l in txt_exc.get("1.0", tk.END).splitlines() if l.strip()]
+        guardar_config(extensiones_permitidas=nuevas_exts, carpetas_excluidas=nuevas_excs)
+        toast("Configuración guardada", "Se han actualizado extensiones y carpetas excluidas.")
+        top.destroy()
+
+    ttk.Button(barra, text="Restaurar valores por defecto", command=restaurar_por_defecto).pack(side=tk.LEFT, padx=4)
+    ttk.Button(barra, text="Guardar", bootstyle=SUCCESS, command=guardar_cambios).pack(side=tk.RIGHT, padx=4)
+    ttk.Button(barra, text="Cancelar", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+
+# =========================
+# UI Mejorada (ttkbootstrap)
+# =========================
+style = ttk.Style('flatly')  # prueba 'darkly', 'superhero', etc.
 root = style.master
 root.title("Generador de Prompt para IA")
 
+# Icono opcional
 try:
-    logo = tk.PhotoImage(file="lightgoldenrodyellow.png")
-    root.iconphoto(True, logo)
-except Exception as e:
-    print("Logo no encontrado o error al cargarlo:", e)
+    icono = tk.PhotoImage(file="lightgoldenrodyellow.png")  # mismo logo si quieres
+    root.iconphoto(True, icono)
+except Exception:
+    pass
 
+# Maximizar/ajustar
 try:
     root.state("zoomed")
 except Exception:
     root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}")
 
+# ======= Menú de aplicación =======
+menubar = tk.Menu(root)
+menu_archivo = tk.Menu(menubar, tearoff=0)
+menu_archivo.add_command(label="Seleccionar carpeta de proyecto…", command=seleccionar_carpeta_proyecto)
+menu_archivo.add_command(label="Seleccionar archivo SQLite…", command=seleccionar_sqlite)
+menu_archivo.add_separator()
+menu_archivo.add_command(label="Guardar reporte…", command=guardar_reporte)
+menu_archivo.add_separator()
+menu_archivo.add_command(label="Salir", command=root.destroy)
+menubar.add_cascade(label="Archivo", menu=menu_archivo)
+
+menu_config = tk.Menu(menubar, tearoff=0)
+menu_config.add_command(label="Extensiones y carpetas excluidas…", command=abrir_config_ext_y_excluidas)
+menubar.add_cascade(label="Configuración", menu=menu_config)
+
+root.config(menu=menubar)
+
+# ======= Barra superior =======
+header = ttk.Frame(root, padding=(16, 10))
+header.pack(fill=tk.X)
+lbl_titulo = ttk.Label(header, text="Generador de Prompt", font=("Helvetica", 18, "bold"))
+lbl_titulo.pack(side=tk.LEFT)
+
+# Barra de herramientas
+toolbar = ttk.Frame(root, padding=(12, 6))
+toolbar.pack(fill=tk.X)
+ttk.Button(toolbar, text="Seleccionar carpeta del proyecto", bootstyle=SECONDARY, command=seleccionar_carpeta_proyecto).pack(side=tk.LEFT, padx=4)
+ttk.Button(toolbar, text="Generar", bootstyle=SUCCESS, command=generar_prompt).pack(side=tk.LEFT, padx=4)
+ttk.Button(toolbar, text="Copiar", command=copiar_reporte).pack(side=tk.LEFT, padx=4)
+ttk.Button(toolbar, text="Guardar", command=guardar_reporte).pack(side=tk.LEFT, padx=4)
+ttk.Button(toolbar, text="Guardar prompts 'jocarsa-*'", bootstyle=INFO, command=guardar_prompts_para_jocarsa).pack(side=tk.LEFT, padx=4)
+
+# Separador
+ttk.Separator(root, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
+
+# Paned principal
 paned = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
 paned.pack(fill=tk.BOTH, expand=True)
 
-frame_left_container = ttk.Frame(paned)
-paned.add(frame_left_container, weight=1)
+# -------- ScrollableFrame reutilizable (para recuperar scroll en la izquierda) --------
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, master, *args, **kwargs):
+        super().__init__(master, *args, **kwargs)
+        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        self.vscroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vscroll.set)
 
-canvas_left = tk.Canvas(frame_left_container, borderwidth=0)
-scrollbar_left = ttk.Scrollbar(frame_left_container, orient="vertical", command=canvas_left.yview)
-canvas_left.configure(yscrollcommand=scrollbar_left.set)
-scrollbar_left.pack(side=tk.RIGHT, fill=tk.Y)
-canvas_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-frame_left = ttk.Frame(canvas_left, padding=(60, 20, 20, 20))
-canvas_left.create_window((0, 0), window=frame_left, anchor="nw")
+        self.inner = ttk.Frame(self.canvas)
+        self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
 
-def on_frame_configure(event):
-    canvas_left.configure(scrollregion=canvas_left.bbox("all"))
-frame_left.bind("<Configure>", on_frame_configure)
+        self.inner.bind("<Configure>", self._on_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-frame_right = ttk.Frame(paned, padding=10)
-paned.add(frame_right, weight=1)
+        # Scroll con rueda del ratón (Windows/Linux/Mac)
+        self._bind_mousewheel(self.canvas)
+        self._bind_mousewheel(self.inner)
 
-# --- PANEL IZQUIERDO: FORMULARIO ---
-lbl_form_title = ttk.Label(frame_left, text="Configuración del Prompt", font=("Arial", 14, "bold"))
-lbl_form_title.pack(anchor="w", pady=(0,10))
+    def _on_configure(self, event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-def crear_campo(master, label_text, desc_text, height=3):
-    frame = ttk.Frame(master)
-    frame.pack(fill=tk.X, pady=5)
-    lbl = ttk.Label(frame, text=label_text, font=("Arial", 10, "bold"))
-    lbl.pack(anchor="w")
-    lbl_desc = ttk.Label(frame, text=desc_text, font=("Arial", 8))
-    lbl_desc.pack(anchor="w")
-    txt = tk.Text(frame, height=height)
-    txt.pack(fill=tk.X, pady=2)
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.window_id, width=event.width)
+
+    def _bind_mousewheel(self, widget):
+        widget.bind("<Enter>", lambda e: widget.bind_all("<MouseWheel>", self._on_mousewheel))
+        widget.bind("<Leave>", lambda e: widget.unbind_all("<MouseWheel>"))
+        widget.bind("<Enter>", lambda e: (widget.bind_all("<Button-4>", self._on_mousewheel_linux),
+                                          widget.bind_all("<Button-5>", self._on_mousewheel_linux)), add="+")
+        widget.bind("<Leave>", lambda e: (widget.unbind_all("<Button-4>"),
+                                          widget.unbind_all("<Button-5>")), add="+")
+
+    def _on_mousewheel(self, event):
+        delta = int(-1*(event.delta/120))
+        self.canvas.yview_scroll(delta, "units")
+
+    def _on_mousewheel_linux(self, event):
+        if event.num == 4:
+            self.canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(3, "units")
+
+# -------- Panel Izquierdo (Formulario con scroll recuperado) --------
+left_scroll = ScrollableFrame(paned)
+paned.add(left_scroll, weight=1)
+frame_izq = left_scroll.inner  # Usamos el frame interior
+
+# Grupo: Parámetros del prompt
+grp_param = ttk.Labelframe(frame_izq, text="Parámetros del prompt", padding=12)
+grp_param.pack(fill=tk.X, pady=6)
+
+def crear_campo(master, titulo, ayuda, alto=3):
+    frm = ttk.Frame(master)
+    frm.pack(fill=tk.X, pady=6)
+    ttk.Label(frm, text=titulo, font=("Helvetica", 10, "bold")).pack(anchor="w")
+    ttk.Label(frm, text=ayuda, font=("Helvetica", 8)).pack(anchor="w")
+    txt = tk.Text(frm, height=alto, wrap="word")
+    txt.pack(fill=tk.X, pady=4)
     return txt
 
-txt_contexto = crear_campo(frame_left, "Contexto", "Explica la situación o problema.", height=3)
-txt_objetivo = crear_campo(frame_left, "Objetivo", "Define claramente lo que quieres lograr.", height=3)
-txt_restricciones = crear_campo(frame_left, "Restricciones", "Especifica tecnologías, versiones y limitaciones.", height=3)
-txt_formato = crear_campo(frame_left, "Formato de salida", "Define si necesitas código, explicación, JSON, etc.", height=3)
+txt_contexto = crear_campo(grp_param, "Contexto", "Describe la situación o el problema.", alto=3)
+txt_objetivo = crear_campo(grp_param, "Objetivo", "Expón claramente lo que quieres lograr.", alto=3)
+txt_restricciones = crear_campo(grp_param, "Restricciones", "Tecnologías, versiones y limitaciones.", alto=3)
+txt_formato = crear_campo(grp_param, "Formato de salida", "Código, explicación, JSON, etc.", alto=3)
 
-btn_select_folder = ttk.Button(frame_left, text="Seleccionar carpeta del proyecto", command=select_project_folder)
-btn_select_folder.pack(pady=5, fill=tk.X)
+# Grupo: Proyecto
+grp_proy = ttk.Labelframe(frame_izq, text="Proyecto", padding=12)
+grp_proy.pack(fill=tk.X, pady=6)
 
-separator = ttk.Separator(frame_left, orient=tk.HORIZONTAL)
-separator.pack(fill=tk.X, pady=10)
+fila_proy = ttk.Frame(grp_proy)
+fila_proy.pack(fill=tk.X)
+ttk.Button(fila_proy, text="Seleccionar carpeta…", command=seleccionar_carpeta_proyecto).pack(side=tk.LEFT)
+lbl_carpeta = ttk.Label(fila_proy, text=cfg.get("ultima_carpeta_codigo") or "(sin carpeta seleccionada)")
+lbl_carpeta.pack(side=tk.LEFT, padx=8)
 
-lbl_db = ttk.Label(frame_left, text="Base de Datos", font=("Arial", 12, "bold"))
-lbl_db.pack(anchor="w")
+# Grupo: Base de datos
+grp_bd = ttk.Labelframe(frame_izq, text="Base de datos", padding=12)
+grp_bd.pack(fill=tk.X, pady=6)
 
-db_option = tk.StringVar(value="sqlite")
-frame_db_options = ttk.Frame(frame_left)
-frame_db_options.pack(fill=tk.X, pady=5)
+var_bd = tk.StringVar(value="sqlite")
+fila_bd_opts = ttk.Frame(grp_bd)
+fila_bd_opts.pack(fill=tk.X, pady=4)
+ttk.Radiobutton(fila_bd_opts, text="SQLite", variable=var_bd, value="sqlite",
+                command=alternar_opciones_bd).pack(side=tk.LEFT, padx=6)
+ttk.Radiobutton(fila_bd_opts, text="MySQL", variable=var_bd, value="mysql",
+                command=alternar_opciones_bd).pack(side=tk.LEFT, padx=6)
 
-rbtn_sqlite = ttk.Radiobutton(frame_db_options, text="SQLite", variable=db_option, value="sqlite", command=toggle_db_options)
-rbtn_sqlite.pack(side=tk.LEFT, padx=5)
-rbtn_mysql = ttk.Radiobutton(frame_db_options, text="MySQL Dump", variable=db_option, value="mysql", command=toggle_db_options)
-rbtn_mysql.pack(side=tk.LEFT, padx=5)
+# SQLite
+marco_sqlite = ttk.Frame(grp_bd)
+fila_sqlite = ttk.Frame(marco_sqlite)
+fila_sqlite.pack(fill=tk.X, pady=4)
+ttk.Button(fila_sqlite, text="Seleccionar archivo SQLite…", command=seleccionar_sqlite).pack(side=tk.LEFT)
+lbl_sqlite = ttk.Label(fila_sqlite, text=os.path.basename(cfg.get("sqlite_file")) if cfg.get("sqlite_file") else "(ningún archivo seleccionado)")
+lbl_sqlite.pack(side=tk.LEFT, padx=8)
 
-frame_sqlite = ttk.Frame(frame_left)
-btn_select_sqlite = ttk.Button(frame_sqlite, text="Seleccionar archivo SQLite", command=seleccionar_sqlite)
-btn_select_sqlite.pack(side=tk.LEFT, padx=5)
-lbl_sqlite = ttk.Label(frame_sqlite, text="Ningún archivo seleccionado")
-lbl_sqlite.pack(side=tk.LEFT, padx=5)
+# MySQL
+marco_mysql = ttk.Frame(grp_bd)
+ttk.Label(marco_mysql, text="Servidor:").pack(anchor="w", padx=4, pady=2)
+ent_mysql_servidor = ttk.Entry(marco_mysql)
+ent_mysql_servidor.pack(fill=tk.X, padx=4, pady=2)
+ent_mysql_servidor.bind("<FocusOut>", guardar_datos_mysql_si_cambian)
 
-frame_mysql = ttk.Frame(frame_left)
-lbl_mysql_server = ttk.Label(frame_mysql, text="Servidor:")
-lbl_mysql_server.pack(anchor="w", padx=5, pady=2)
-entry_mysql_server = ttk.Entry(frame_mysql)
-entry_mysql_server.pack(fill=tk.X, padx=5, pady=2)
-entry_mysql_server.bind("<FocusOut>", lambda e: save_mysql_data())
+ttk.Label(marco_mysql, text="Usuario:").pack(anchor="w", padx=4, pady=2)
+ent_mysql_usuario = ttk.Entry(marco_mysql)
+ent_mysql_usuario.pack(fill=tk.X, padx=4, pady=2)
+ent_mysql_usuario.bind("<FocusOut>", guardar_datos_mysql_si_cambian)
 
-lbl_mysql_user = ttk.Label(frame_mysql, text="Usuario:")
-lbl_mysql_user.pack(anchor="w", padx=5, pady=2)
-entry_mysql_user = ttk.Entry(frame_mysql)
-entry_mysql_user.pack(fill=tk.X, padx=5, pady=2)
-entry_mysql_user.bind("<FocusOut>", lambda e: save_mysql_data())
+ttk.Label(marco_mysql, text="Contraseña:").pack(anchor="w", padx=4, pady=2)
+ent_mysql_contrasena = ttk.Entry(marco_mysql, show="*")
+ent_mysql_contrasena.pack(fill=tk.X, padx=4, pady=2)
+ent_mysql_contrasena.bind("<FocusOut>", guardar_datos_mysql_si_cambian)
 
-lbl_mysql_pass = ttk.Label(frame_mysql, text="Contraseña:")
-lbl_mysql_pass.pack(anchor="w", padx=5, pady=2)
-entry_mysql_pass = ttk.Entry(frame_mysql, show="*")
-entry_mysql_pass.pack(fill=tk.X, padx=5, pady=2)
-entry_mysql_pass.bind("<FocusOut>", lambda e: save_mysql_data())
+ttk.Label(marco_mysql, text="Base de datos:").pack(anchor="w", padx=4, pady=2)
+ent_mysql_bd = ttk.Entry(marco_mysql)
+ent_mysql_bd.pack(fill=tk.X, padx=4, pady=2)
+ent_mysql_bd.bind("<FocusOut>", guardar_datos_mysql_si_cambian)
 
-lbl_mysql_db = ttk.Label(frame_mysql, text="Base de datos:")
-lbl_mysql_db.pack(anchor="w", padx=5, pady=2)
-entry_mysql_db = ttk.Entry(frame_mysql)
-entry_mysql_db.pack(fill=tk.X, padx=5, pady=2)
-entry_mysql_db.bind("<FocusOut>", lambda e: save_mysql_data())
+# Botones de BD y generación
+fila_acciones = ttk.Frame(frame_izq)
+fila_acciones.pack(fill=tk.X, pady=8)
+ttk.Button(fila_acciones, text="Probar conexión BD", command=probar_conexion_bd).pack(side=tk.LEFT, padx=4)
+ttk.Button(fila_acciones, text="Generar Prompt", bootstyle=SUCCESS, command=generar_prompt).pack(side=tk.LEFT, padx=4)
+ttk.Button(fila_acciones, text="Guardar prompts para 'jocarsa-*'", bootstyle=INFO, command=guardar_prompts_para_jocarsa).pack(side=tk.LEFT, padx=4)
 
-btn_test_connection = ttk.Button(frame_left, text="Test DB Connection", command=test_db_connection)
-btn_test_connection.pack(pady=5, fill=tk.X)
+# -------- Panel Derecho (Salida con conmutador Markdown/WYSIWYG y barra de scroll) --------
+frame_der = ttk.Frame(paned, padding=10)
+paned.add(frame_der, weight=1)
 
-btn_generar = ttk.Button(frame_left, text="Generar Prompt", bootstyle=SUCCESS, command=generar_prompt)
-btn_generar.pack(pady=10, fill=tk.X)
+header_der = ttk.Frame(frame_der)
+header_der.pack(fill=tk.X)
+ttk.Label(header_der, text="Salida", font=("Helvetica", 14, "bold")).pack(side=tk.LEFT)
 
-btn_save_prompts = ttk.Button(frame_left, text="Guardar Prompts para proyectos jocarsa-", bootstyle=SUCCESS, command=save_prompts_for_jocarsa_projects)
-btn_save_prompts.pack(pady=10, fill=tk.X)
+vista_modo = tk.StringVar(value="markdown")  # 'markdown' o 'vista'
+def on_toggle_vista():
+    actualizar_vista_salida()
 
-# --- PANEL DERECHO: SALIDA DEL PROMPT ---
-lbl_prompt_title = ttk.Label(frame_right, text="Prompt Generado", font=("Arial", 14, "bold"))
-lbl_prompt_title.pack(anchor="w", pady=(0,10))
+ttk.Label(header_der, text="Vista:").pack(side=tk.RIGHT, padx=(0, 6))
+ttk.Radiobutton(header_der, text="WYSIWYG", variable=vista_modo, value="vista", command=on_toggle_vista).pack(side=tk.RIGHT)
+ttk.Radiobutton(header_der, text="Markdown", variable=vista_modo, value="markdown", command=on_toggle_vista).pack(side=tk.RIGHT)
 
-txt_prompt_output = tk.Text(frame_right, wrap="word", state=tk.DISABLED)
-txt_prompt_output.pack(fill=tk.BOTH, expand=True)
+# 1) CONTENEDOR de Markdown crudo con SCROLLBAR VERTICAL visible
+frame_markdown = ttk.Frame(frame_der)
+frame_markdown.pack(fill=tk.BOTH, expand=True)
+scroll_md = ttk.Scrollbar(frame_markdown, orient="vertical")
+txt_salida_raw = tk.Text(frame_markdown, wrap="word", state=tk.DISABLED, yscrollcommand=scroll_md.set)
+scroll_md.config(command=txt_salida_raw.yview)
+txt_salida_raw.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+scroll_md.pack(side=tk.RIGHT, fill=tk.Y)
 
-scrollbar = ttk.Scrollbar(txt_prompt_output, orient="vertical", command=txt_prompt_output.yview)
-txt_prompt_output.configure(yscrollcommand=scrollbar.set)
-scrollbar.pack(side="right", fill="y")
+# 2) Vista “WYSIWYG” (Text con estilos + su propia barra de scroll)
+frame_vista = ttk.Frame(frame_der)
+txt_vista = tk.Text(frame_vista, wrap="word", state=tk.DISABLED)
+scroll_vista = ttk.Scrollbar(frame_vista, orient="vertical", command=txt_vista.yview)
+txt_vista.configure(yscrollcommand=scroll_vista.set)
+txt_vista.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+scroll_vista.pack(side=tk.RIGHT, fill=tk.Y)
 
-frame_report_buttons = ttk.Frame(frame_right)
-frame_report_buttons.pack(fill=tk.X, pady=5)
+# Fuentes para vista
+font_base = tkfont.Font(family="Helvetica", size=11)
+font_h1 = tkfont.Font(family="Helvetica", size=18, weight="bold")
+font_h2 = tkfont.Font(family="Helvetica", size=16, weight="bold")
+font_h3 = tkfont.Font(family="Helvetica", size=14, weight="bold")
+font_bold = tkfont.Font(family="Helvetica", size=11, weight="bold")
+font_code = tkfont.Font(family="Courier", size=10)
 
-btn_copy = ttk.Button(frame_report_buttons, text="Copiar Reporte", command=copy_report)
-btn_copy.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+# Tags
+txt_vista.tag_configure("h1", font=font_h1, spacing3=6)
+txt_vista.tag_configure("h2", font=font_h2, spacing3=4)
+txt_vista.tag_configure("h3", font=font_h3, spacing3=2)
+txt_vista.tag_configure("bold", font=font_bold)
+txt_vista.tag_configure("codeblock", font=font_code, background="#f5f5f5", spacing1=2, spacing3=6, lmargin1=8, lmargin2=8)
+txt_vista.tag_configure("mono", font=font_code)
+txt_vista.tag_configure("p", font=font_base, spacing3=6)
 
-btn_save = ttk.Button(frame_report_buttons, text="Guardar Reporte", command=save_report)
-btn_save.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+def renderizar_vista(markdown_text: str):
+    """
+    Render sencillo de Markdown a Text con estilos:
+    - #, ##, ### como headers
+    - **negrita**
+    - ``` bloques de código ```
+    - `inline code`
+    - resto como párrafos
+    """
+    txt_vista.config(state=tk.NORMAL)
+    txt_vista.delete("1.0", tk.END)
 
-# Cargar rutas usadas anteriormente
-last_used_paths = load_last_used_paths()
-if "last_code_folder" in last_used_paths:
-    selected_project_folder = last_used_paths["last_code_folder"]
-if "last_db_folder" in last_used_paths:
-    sqlite_file_path = last_used_paths["last_db_folder"]
-    lbl_sqlite.config(text=os.path.basename(sqlite_file_path))
-if "mysql" in last_used_paths:
-    mysql_data = last_used_paths["mysql"]
-    entry_mysql_server.insert(0, mysql_data.get("server", ""))
-    entry_mysql_user.insert(0, mysql_data.get("user", ""))
-    entry_mysql_pass.insert(0, mysql_data.get("password", ""))
-    entry_mysql_db.insert(0, mysql_data.get("database", ""))
+    in_code = False
+    code_buffer = []
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip("\n")
 
+        # Bloques de código ```lang
+        if line.strip().startswith("```"):
+            if not in_code:
+                in_code = True
+                code_buffer = []
+            else:
+                # Fin de bloque
+                if code_buffer:
+                    start = txt_vista.index(tk.INSERT)
+                    txt_vista.insert(tk.END, "\n".join(code_buffer) + "\n")
+                    end = txt_vista.index(tk.INSERT)
+                    txt_vista.tag_add("codeblock", start, end)
+                in_code = False
+            continue
+
+        if in_code:
+            code_buffer.append(line)
+            continue
+
+        # Encabezados
+        if line.startswith("### "):
+            start = txt_vista.index(tk.INSERT)
+            txt_vista.insert(tk.END, line[4:] + "\n")
+            end = txt_vista.index(tk.INSERT)
+            txt_vista.tag_add("h3", start, end)
+            continue
+        if line.startswith("## "):
+            start = txt_vista.index(tk.INSERT)
+            txt_vista.insert(tk.END, line[3:] + "\n")
+            end = txt_vista.index(tk.INSERT)
+            txt_vista.tag_add("h2", start, end)
+            continue
+        if line.startswith("# "):
+            start = txt_vista.index(tk.INSERT)
+            txt_vista.insert(tk.END, line[2:] + "\n")
+            end = txt_vista.index(tk.INSERT)
+            txt_vista.tag_add("h1", start, end)
+            continue
+
+        # Negrita **texto**
+        start_para = txt_vista.index(tk.INSERT)
+        txt_vista.insert(tk.END, line + "\n")
+        end_para = txt_vista.index(tk.INSERT)
+
+        for m in re.finditer(r"\*\*(.+?)\*\*", line):
+            s = f"{start_para}+{m.start(1)}c"
+            e = f"{start_para}+{m.end(1)}c"
+            txt_vista.tag_add("bold", s, e)
+
+        # `inline code`
+        for m in re.finditer(r"\`(.+?)\`", line):
+            s = f"{start_para}+{m.start(1)}c"
+            e = f"{start_para}+{m.end(1)}c"
+            txt_vista.tag_add("mono", s, e)
+
+        txt_vista.tag_add("p", start_para, end_para)
+
+    txt_vista.config(state=tk.DISABLED)
+
+def actualizar_vista_salida():
+    modo = vista_modo.get()
+    if modo == "markdown":
+        frame_vista.pack_forget()
+        frame_markdown.pack(fill=tk.BOTH, expand=True)
+    else:
+        contenido = txt_salida_raw.get("1.0", tk.END)
+        renderizar_vista(contenido)
+        frame_markdown.pack_forget()
+        frame_vista.pack(fill=tk.BOTH, expand=True)
+
+# ======= Barra de estado =======
+statusbar = ttk.Frame(root, padding=(10, 6))
+statusbar.pack(fill=tk.X)
+var_status = tk.StringVar(value="Listo.")
+ttk.Label(statusbar, textvariable=var_status).pack(side=tk.LEFT)
+prog = ttk.Progressbar(statusbar, mode="indeterminate", bootstyle=INFO)
+
+# Mostrar el panel correcto según la BD seleccionada
+alternar_opciones_bd()
+
+# Splash de bienvenida
+root.after(250, mostrar_bienvenida)
+
+set_status("Listo. Configura los parámetros y genera el prompt.")
 root.mainloop()
