@@ -1,0 +1,7 @@
+body { --sidebar-w: 420px; }
+.card { border-radius: 1rem; }
+.card .card-header { border-top-left-radius: 1rem; border-top-right-radius: 1rem; }
+textarea.form-control { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+#md-view pre code { display:block; padding: 0.75rem; border-radius: .5rem; background: #f6f8fa; }
+.list-group-item.dir { cursor: pointer; }
+.list-group-item.dir:hover { background: #f1f5ff; }

@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-12 col-lg-5">
+    <div class="card shadow-sm">
+      <div class="card-header bg-white">
+        <h5 class="mb-0"><i class="bi bi-sliders"></i> Parámetros del prompt</h5>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Contexto</label>
+          <textarea class="form-control" id="ctx" rows="3" placeholder="Describe la situación o el problema."></textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Objetivo</label>
+          <textarea class="form-control" id="obj" rows="3" placeholder="Expón lo que quieres lograr."></textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Restricciones</label>
+          <textarea class="form-control" id="res" rows="3" placeholder="Tecnologías, versiones y limitaciones."></textarea>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Formato de salida</label>
+          <textarea class="form-control" id="fmt" rows="3" placeholder="Código, explicación, JSON, etc."></textarea>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Proyecto</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-folder2-open"></i></span>
+            <input class="form-control" id="proyecto" placeholder="Ruta absoluta a la carpeta del proyecto">
+            <button class="btn btn-outline-primary" id="btn-browse-proyecto">Explorar</button>
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Base de datos</label>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="dbmode" id="db_sqlite" value="sqlite" checked>
+            <label class="form-check-label" for="db_sqlite">SQLite</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="dbmode" id="db_mysql" value="mysql">
+            <label class="form-check-label" for="db_mysql">MySQL</label>
+          </div>
+        </div>
+
+        <div id="sqlite_opts" class="mb-3">
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-filetype-sql"></i></span>
+            <input class="form-control" id="sqlitefile" placeholder="Ruta a archivo SQLite">
+            <button class="btn btn-outline-secondary" id="btn-browse-sqlite">Elegir</button>
+          </div>
+        </div>
+
+        <div id="mysql_opts" class="mb-3 d-none">
+          <div class="row g-2">
+            <div class="col-12 col-md-6">
+              <label class="form-label">Servidor</label>
+              <input class="form-control" id="mysql_server" placeholder="localhost">
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Usuario</label>
+              <input class="form-control" id="mysql_user" placeholder="root">
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Contraseña</label>
+              <input type="password" class="form-control" id="mysql_pass" placeholder="••••••">
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Base de datos</label>
+              <input class="form-control" id="mysql_db" placeholder="nombre_bd">
+            </div>
+          </div>
+        </div>
+
+        <div class="border rounded p-3 mb-3">
+          <h6 class="fw-semibold mb-2"><i class="bi bi-gear"></i> Configuración</h6>
+          <div class="row g-2">
+            <div class="col-12 col-md-6">
+              <label class="form-label">Extensiones permitidas</label>
+              <textarea class="form-control" id="exts" rows="3"></textarea>
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Carpetas excluidas</label>
+              <textarea class="form-control" id="excs" rows="3"></textarea>
+            </div>
+          </div>
+          <div class="form-check mt-2">
+            <input class="form-check-input" type="checkbox" id="chk_bienvenida">
+            <label class="form-check-label" for="chk_bienvenida">Mostrar bienvenida al iniciar</label>
+          </div>
+          <div class="mt-2 d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" id="btn-defaults">Restaurar por defecto</button>
+            <button class="btn btn-outline-success btn-sm" id="btn-savecfg">Guardar configuración</button>
+          </div>
+        </div>
+
+        <div class="d-flex gap-2">
+          <button class="btn btn-info" id="btn-testdb"><i class="bi bi-plug"></i> Probar conexión BD</button>
+          <button class="btn btn-success" id="btn-generate"><i class="bi bi-lightning-charge"></i> Generar Prompt</button>
+          <button class="btn btn-primary" id="btn-save"><i class="bi bi-save"></i> Guardar reporte</button>
+          <button class="btn btn-outline-primary" id="btn-jocarsa"><i class="bi bi-archive"></i> Guardar prompts "jocarsa-*" </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-lg-7">
+    <div class="card shadow-sm h-100">
+      <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="bi bi-journal-text"></i> Salida</h5>
+        <div class="btn-group btn-group-sm" role="group">
+          <input type="radio" class="btn-check" name="viewMode" id="view_md" autocomplete="off" checked>
+          <label class="btn btn-outline-secondary" for="view_md">Markdown</label>
+          <input type="radio" class="btn-check" name="viewMode" id="view_wys">
+          <label class="btn btn-outline-secondary" for="view_wys">WYSIWYG</label>
+        </div>
+      </div>
+      <div class="card-body">
+        <div id="md-raw" class="border rounded p-2 bg-white" style="height:65vh; overflow:auto; white-space:pre-wrap;"></div>
+        <div id="md-view" class="border rounded p-3 bg-white d-none" style="height:65vh; overflow:auto;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
