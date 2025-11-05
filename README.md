@@ -1,6 +1,4 @@
 
-
-```markdown
 # 📄 Generador de Reportes Markdown de Proyectos
 
 Este script en Python genera automáticamente un **reporte completo en formato Markdown** (`.md`) a partir del contenido de una carpeta de código.  
@@ -191,5 +189,5 @@ MIT License © 2025 José Vicente Carratalá Sanchis
 
 ---
 
-```
+
 
